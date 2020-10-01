@@ -1,0 +1,500 @@
+---
+title: "Analysis"
+author: "Nicolas Banholzer"
+date: "9/30/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+
+```{r}
+# Install libraries if not already installed
+# install.packages(c("tidyverse", "coda", "brms", "LaplacesDemon", "tidybayes"), dependencies = T)
+
+# Libraries used for running this markdown file
+library(tidyverse)
+library(coda)
+library(brms)
+library(LaplacesDemon)
+library(tidybayes)
+```
+
+## Data
+
+Here we load the preprocessed data file with the engineered features mouse speed and accuracy, and without personal attributes such as age and gender. Both the raw CMM data and the personal attributes can, unfortunately, not be shared due to privacy concerns from our industry partner.
+
+```{r}
+df <- read.csv("data.csv", stringsAsFactors = F)
+```
+
+### Stratification
+
+Here we stratify the data and require a minimum of two recordings per user and only consider recordings with at least 10 complete computer mouse trajectories. With fewer trajectories, average mouse speed and accuracy might be too noisy. Nevertheless, we later run a sensitivity analysis where we vary the minimum number of trajectories.
+
+```{r}
+df_sub <- df %>%
+  group_by(user) %>%
+  dplyr::filter(n() >= 2) %>%
+  ungroup %>%
+  dplyr::filter(!is.na(speed)) %>%
+  dplyr::filter(n_traj >= 10) 
+```
+
+
+### Standardization
+
+Here we standardize the continuous variables. For mouse speed and accuracy, standardization needs to be done before computing the two-way interaction term, such that the sign of the interaction term indicates the direction of the trade-off.
+
+```{r}
+df_sub <- df_sub %>%
+  mutate(speed = scale(speed),
+         accuracy = scale(accuracy),
+         wheels = scale(sqrt(wheels)),
+         clicks = scale(clicks)) %>%
+  mutate(tradeoff = scale(speed * accuracy))
+```
+
+## Descriptives 
+
+### Speed & Accuracy (Figure S2)
+
+Here we show frequency plots of our main features: mouse speed and accuracy. 
+
+```{r}
+# Frequency plot / Histogram for mouse speed
+ggplot(df_sub, aes(speed)) +
+  geom_histogram(col = "white", bins = 20) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  labs(x = "Speed", y = "Count") +
+  theme_classic() 
+
+# Frequency plot / Histogram for mouse accuracy
+ggplot(df_sub, aes(accuracy)) +
+  geom_histogram(col = "white", bins = 20) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  labs(x = "Accuracy", y = "Count") +
+  theme_classic() 
+```
+
+### Stress (Figure 2)
+
+Here we compute the user average of valence and arousal across all recordings and summarize these values in a dot plot. The dots are colored according to the average level of stress. The color coding is defined on a continuous scale as Stress = Arousal + (8 - Valence). Note that upon modeling, we encode stress as a binary response variable. 
+
+```{r}
+df_sub %>%
+  dplyr::select(user, valence, arousal) %>%
+  group_by(user) %>%
+  # User averages of valence and arousal
+  summarise_all(mean, na.rm = T) %>%
+  ungroup() %>%
+  # Temporary variable for color coding
+  mutate(stress = arousal + (8 - valence)) %>%
+  ggplot(aes(x = valence, y = arousal, color = stress, fill = stress)) +
+  geom_point(size = 2) + 
+  geom_hline(aes(yintercept = 4), linetype = "dashed") +
+  geom_vline(aes(xintercept = 4), linetype = "dashed") +
+  scale_y_continuous(limits = c(1, 7), breaks = c(1, 4, 7)) +
+  scale_x_continuous(limits = c(1, 7), breaks = c(1, 4, 7)) +
+  scale_fill_gradient2(low = "deepskyblue4", mid = "mediumorchid2", high = "orangered4", midpoint = 8) +
+  scale_color_gradient2(low = "deepskyblue4", mid = "mediumorchid2", high = "orangered4", midpoint = 8) +
+  annotation_custom(grob = grid::textGrob(label = "Low valence", gp = grid::gpar(fontsize = 8)),
+                    xmin = 2.5, xmax = 2.5, ymin = 0.5, ymax = 0.5) +
+  annotation_custom(grob = grid::textGrob(label = "High valence", gp = grid::gpar(fontsize = 8)),
+                    xmin = 5.5, xmax = 5.5, ymin = 0.5, ymax = 0.5) +
+  annotation_custom(grob = grid::textGrob(label = "Low arousal", rot = 90, gp = grid::gpar(fontsize = 8)),
+                    ymin = 2.5, ymax = 2.5, xmin = 0.5, xmax = 0.5) +
+  annotation_custom(grob = grid::textGrob(label = "High arousal", rot = 90, gp = grid::gpar(fontsize = 8)),
+                    ymin = 5.5, ymax = 5.5, xmin = 0.5, xmax = 0.5) +
+  coord_cartesian(clip = "off") +
+  labs(x = "", y = "") +
+  theme_classic() +
+  theme(legend.position = "none", axis.text.y = element_text(angle = 90, hjust = 0.5),
+        plot.margin = unit(c(0,0,0,0), "cm"), axis.title.x = element_blank())
+```
+
+## Main analysis
+
+### Priors
+
+Our prior choices follow prior choice recommendations from the Stan Development Team, see https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations. 
+
+```{r}
+priors <- c(set_prior('student_t(7,0,2.5)', class = 'b'),
+            set_prior('student_t(7,0,10)', class = 'b', coef = 'Intercept'),
+            set_prior('normal(0,1)', class = 'sd'))
+```
+
+### Model
+
+Our main model is vi2 with stress as the dependent variable and user-specific intercepts and the mouse features as the independent variables.
+
+```{r}
+# With mouse movements
+vi2 <- brm(stress ~ 0 + Intercept + (1 | user) + speed + accuracy + tradeoff, 
+           data = df_sub, family = binomial(link = "logit"), prior = priors,
+           seed = 1234)
+```
+
+
+### Model diagnostics
+
+#### PSIS-LOO (Figure S3)
+
+Here we show the PSIS-LOO diagnostics for investigating influential observations.
+
+```{r}
+# Get the LOO estimates
+loo_vi2 <- loo(vi2)
+kstat <- tibble(`Data point` = 1:nrow(df_sub),
+                `Pareto shape k` = loo_vi2$diagnostics$pareto_k)
+
+# Plot LOO estimates by data point
+kstat %>%
+  ggplot(aes(x = `Data point`, y = `Pareto shape k`)) +
+  geom_point(shape = 4) +
+  geom_hline(aes(yintercept = .5), linetype = "dashed", color = 'red') +
+  geom_hline(aes(yintercept = .7), linetype = "dashed", color = 'red') +
+  geom_hline(aes(yintercept = 1), linetype = "dashed", color = 'red') +
+  scale_y_continuous(limits = c(-.2, 1), breaks = seq(-.2, 1, .2)) +
+  scale_x_continuous(limits = c(1, nrow(df_sub)), breaks = c(0, 500, 1000, 1500, nrow(df_sub))) +
+  labs(x = 'Data point', y = 'Estimated shape parameter k') +
+  theme_classic()
+```
+
+### Estimation results (Table S2)
+
+The following table shows estimation results of all model parameters.
+
+```{r}
+cbind(
+  rbind(fixef(vi2), t(as.matrix(summary(vi2)$random$user[1:4])), ranef(vi2)$user[,,1], rep(NA, 4))[ ,1:2], # Parameter
+  coda::HPDinterval(as.mcmc(vi2, combine_chains = T)), # HPDI interval
+  rhat(vi2), # Rhat
+  neff_ratio(vi2) # Effective sample size ratio
+  ) %>%
+  data.frame() %>%
+  slice(-nrow(.)) %>%
+  mutate_all(round, 2) %>%
+  mutate(Parameter = c("mu_alpha", "beta_1", "beta_2", "beta_3", "tau", paste0("alpha_", 1:68))) %>%
+  mutate(Parameter_name = c("Intercept", "Speed", "Accuracy", "Speed x Accuracy", "SD of alpha_i", paste0("Subject ", 1:68))) %>%
+  dplyr::select(Parameter, Parameter_name, everything())
+```
+
+### Main effects (Figure 3)
+
+Here we show the posterior distributions of our main effects b1 (speed), b2 (accuracy), and b3 (speed x accuracy).
+
+```{r}
+# Function to plot the posterior density
+bayes_dens_pl <- function(model, par, xl, yl = "Density") {
+  
+  draws <- vi2 %>% spread_draws(!! par)
+  mean_hdi <- draws %>% mean_hdi()
+  
+  pl <- ggplot() +
+    geom_density(data = draws, mapping = aes(!! par)) +
+    geom_density(data = data.frame(prior = rst(100000, 0, 2.5, 7)), aes(prior), linetype = "dashed", color = "grey") +
+    scale_y_continuous(expand = c(0,0), breaks = c(0, 1, 2, 3), limits = c(0, 4)) +
+    scale_x_continuous(expand = c(0,0), limits = c(-1, 1), breaks = c(-.5, 0, .5))
+  
+  d <- ggplot_build(pl)$data[[1]]
+    
+  pl <- pl +
+    geom_area(data = subset(d, x >= mean_hdi$.lower & x <= mean_hdi$.upper), aes(x, y), fill = "azure3", alpha = .5) +
+    geom_vline(aes(xintercept = mean_hdi %>% dplyr::select(!! par) %>% unlist), color = 'red', linetype = 'dashed') +
+    geom_vline(aes(xintercept = 0), color = 'black', linetype = 'dashed') +
+    labs(x = xl, y = yl) +
+    theme_classic()
+  
+  return(pl)
+}
+
+# Posterior density plots for b1, b2, and b3
+dpl_speed <- bayes_dens_pl(vi2, par = expr(`b_speed`), xl = "Speed", yl = "Density")
+dpl_acc <- bayes_dens_pl(vi2, par = expr(`b_accuracy`), xl = "Accuracy", yl = "Density")
+dpl_inter <- bayes_dens_pl(vi2, par = expr(`b_tradeoff`), xl = "Speed x Accuracy", yl = "Density")
+
+dpl_speed
+dpl_acc
+dpl_inter
+```
+
+### Probability of stress (Figure 4)
+
+Here we compute the probability of stress for 4,000 posterior samples for parameters of the intercept, mouse speed, mouse accuracy, and mouse speed x accuracy. After that we generate the plot that shows the probability of stress for values of speed and accuracy from -2SD to +2SD.
+
+```{r}
+# Draw posterior samples for model parameters
+post_smpl <- posterior_samples(vi2) %>%
+  dplyr::select(b_Intercept, b_speed, b_accuracy, b_tradeoff)
+# New data grid for values of speed and accuracy
+new_data <- expand.grid(list(speed = seq(-2, 2, .05), 
+                             accuracy = seq(-2, 2, .05)))
+
+# Function to predict probability of stress based on posterior draws and data grid
+pred <- function(speed, accuracy) {
+  mean( post_smpl$b_Intercept + post_smpl$b_speed * speed + post_smpl$b_accuracy * accuracy +
+          post_smpl$b_tradeoff * speed * accuracy )
+}
+
+# Compute probability of stress
+new_data$response <- pmap_dbl(new_data, pred)
+new_data$odds <- exp(new_data$response)
+new_data$prob <- new_data$odds / (1 + new_data$odds)
+
+# Color coding of probabilities
+new_data$prob_fct = factor(cut(new_data$prob, c(seq(0, .2, .05), 1)), 
+                             labels = c("Very low [0.00, .05)", "Low [.05, .10)", 
+                                        "Medium [.10, .15)", 
+                                        "High [.15, .20]", "Very high [.20, 1.00]"))
+
+# Plot
+ggplot() +
+  geom_tile(data = new_data, mapping = aes(x = accuracy, y = speed, fill = prob_fct)) +
+  geom_point(data = df_sub, mapping = aes(x = accuracy, y = speed), alpha = .25, shape = 1, size = 1) +
+  scale_fill_manual(values = c("deepskyblue4", "deepskyblue1", 
+                               "mediumorchid2", 
+                               "orangered", "orangered4")) +
+  scale_x_continuous(limits = c(-2, 2), breaks = seq(-2, 2, 1)) +
+  scale_y_continuous(limits = c(-2, 2), breaks = seq(-2, 2, 1)) +
+  geom_hline(aes(yintercept = 0), linetype = "dashed") +
+  geom_vline(aes(xintercept = 0), linetype = "dashed") +
+  labs(x = "Mouse accuracy", y = "Mouse speed", fill = "Pr(stress)") +
+  theme_classic()
+```
+
+
+
+## Robustness checks
+
+### C1: Preprocessing
+
+Here we show robustness of our main parameter estimates when recordings from two users were omitted that had values for mouse accuracy which were much lower than the average in our sample.  
+
+#### Outlier
+
+```{r}
+df_no_outl <- df %>%
+  group_by(user) %>%
+  dplyr::filter(n() >= 2) %>%
+  ungroup %>%
+  dplyr::filter(!is.na(speed)) %>%
+  dplyr::filter(n_traj >= 10) %>%
+  # Filter recordings from these two users that have outliers for mouse accuracy
+  dplyr::filter(!(user %in% c("ihaxlfun63ic0ht1m5pk", "w8orwzx5cxi9fmd70yaa"))) %>%
+  mutate(speed = scale(speed),
+         accuracy = scale(accuracy)) %>%
+  mutate(tradeoff = scale(speed * accuracy))
+
+# Re-estimate model vi2
+vi2_outl <- brm(stress ~ 0 + Intercept + (1 | user) + speed + accuracy + tradeoff, 
+           data = df_no_outl, family = binomial(link = "logit"), prior = priors,
+           seed = 1234)
+
+# Estimates for b1, b2, and b3
+fixef(vi2_outl)
+```
+
+#### Min. no. of trajectories (Figure S4)
+
+Here we present a sensitivity analysis where we vary the minimum number of trajectories a recording of CMM should have to be considered in our analysis. In our main analysis, this number was set to 10. 
+
+```{r}
+# Minimum number of trajectories
+min_t <- c(2, 5, 10, 15, 20, 30, 50, 100)
+
+vi2_ts <- list()
+
+for (t in 1:length(min_t)) {
+  # Stratification
+  df_t <- df %>%
+    group_by(user) %>%
+    dplyr::filter(n() >= 2) %>%
+    ungroup %>%
+    dplyr::filter(!is.na(speed)) %>%
+    dplyr::filter(n_traj >= min_t[t])
+  
+  # Standardization
+  df_t <- df_t %>%
+    mutate(speed = scale(speed),
+           accuracy = scale(accuracy)) %>%
+    mutate(tradeoff = scale(speed * accuracy))
+  
+  # Estimate model
+  vi2.t <- brm(stress ~ 0 + Intercept + (1 | user) + speed + accuracy + tradeoff, 
+               data = df_t, family = binomial(link = "logit"), prior = priors,
+               seed = 1234)
+  
+  vi2_ts[[t]] <- vi2.t
+}
+
+# Retrieve HPDI for main parameters
+traj_comp <- tibble(t = min_t, ms = vi2_ts) %>%
+  mutate(N = map_int(ms, nobs), Mean = map_dbl(ms, function(m) summary(m)$fixed['tradeoff','Estimate']))
+traj_hpdis <- do.call(rbind, map(vi2_ts, function(m) coda::HPDinterval(as.mcmc(m, combine_chains = T))['b_tradeoff',]))
+traj_comp <- traj_comp %>% mutate(lower = traj_hpdis[ ,1], upper = traj_hpdis[ ,2])
+
+# Plot
+# (a) Posterior estimates of beta_1,2,3
+traj_comp %>%
+  ggplot(aes(x = t)) +
+    geom_point(aes(y = Mean)) +
+    geom_line(aes(y = Mean)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = .1) +
+    geom_hline(aes(yintercept = 0), linetype = "dashed") + 
+    geom_segment(aes(xend = t, y = min(lower), yend = Mean), linetype = "dotted") +
+    scale_y_continuous(breaks = c(0, -.25, -.5, -.75, -1), expand = c(0,0)) +
+    scale_x_continuous(breaks = min_t) +
+    labs(x = "Minimum number of trajectories", y = "Estimate") +
+    theme_classic()
+
+# (b) Number of recordings by minimum number of trajectories
+traj_comp %>%
+  ggplot(aes(x = t)) +
+    geom_point(aes(y = N)) +
+    geom_line(aes(y = N)) +
+    geom_segment(aes(xend = t, y = 800, yend = N), linetype = "dotted") +
+    geom_segment(aes(x = 0, xend = t, y = N, yend = N), linetype = "dotted") +
+    scale_y_continuous(limits = c(800, 2000), expand = c(0,0), breaks = traj_comp$N,
+                       labels = format(traj_comp$N, big.mark = ",")) +
+    scale_x_continuous(breaks = min_t, expand = c(0,0), limits = c(0, 110)) +
+    labs(x = "Minimum number of trajectories", y = "Number of recordings (N)") +
+    theme_classic()
+```
+
+### C2: Model specification
+
+Here we compare alternative model specifications. Note that models 5 to 7 are not shown as the additional data is privacy sensitive and thus not part of the reproducible analysis. 
+
+```{r}
+vi1 <- brm(stress ~ 0 + Intercept + (1 | user), 
+           data = df_sub, family = binomial(link = "logit"), prior = priors,
+           seed = 1234)
+
+# With mouse use
+vi3 <- brm(stress ~ 0 + Intercept + (1 | user) + speed + accuracy + tradeoff + 
+             clicks + wheels, 
+           data = df_sub, family = binomial(link = "logit"), prior = priors,
+           seed = 1234)
+
+# With time
+vi4 <- brm(stress ~ 0 + Intercept + (1 | user) + speed + accuracy + tradeoff + 
+             clicks + wheels + 
+             daytime + weekday, 
+           data = df_sub, family = binomial(link = "logit"), prior = priors,
+           seed = 1234)
+
+# # With socio
+# vi5 <- brm(stress ~ 0 + Intercept + (1 | user) + speed + accuracy + tradeoff + 
+#              clicks + wheels + 
+#              daytime + weekday +
+#              age + gender + education, 
+#            data = df_sub, family = binomial(link = "logit"), prior = priors,
+#            seed = 1234)
+# 
+# # With health
+# vi6 <- brm(stress ~ 0 + Intercept + (1 | user) + speed + accuracy + tradeoff +  
+#              clicks + wheels + 
+#              daytime + weekday +
+#              age + gender + education + 
+#              nutrition_freq_per_day + sport_hours_per_week + smoking_freq + alcohol_freq, 
+#            data = df_sub, family = binomial(link = "logit"), prior = priors,
+#            seed = 1234)
+# 
+# # With personality
+# vi7 <- brm(stress ~ 0 + Intercept + (1 | user) + speed + accuracy + tradeoff + 
+#              clicks + wheels + 
+#              daytime + weekday +
+#              age + gender + education + nutrition_freq_per_day + sport_hours_per_week + smoking_freq + alcohol_freq + 
+#              personality_extraversion + personality_agreeableness + personality_conscientiousness +
+#              personality_neuroticism + personality_openness, 
+#            data = df_sub, family = binomial(link = "logit"), prior = priors, 
+#            seed = 1234)
+```
+
+#### Model comparison (Table S3)
+
+Model comparison according to LOO. The best model has the lowest value for LOO.
+
+```{r}
+# Models
+ms <- list(vi1, vi2, vi3, vi4)
+# Get LOOs
+loos <- map_dbl(ms, function(m) loo(m)$estimates[3])
+
+# Compare LOOs
+tibble(Model = paste0("M", 1:4)) %>%
+  mutate(LOO = loos) %>%
+  mutate(LOO_diff = LOO - min(LOO)) %>%
+  mutate(`Mouse movements` = c("No", rep("Yes", 3)),
+         `Mouse events` = c(rep("No", 2), rep("Yes", 2)),
+         `Observation time` = c(rep("No", 3), rep("Yes", 1))) %>%
+  dplyr::select(Model, `Mouse movements`, `Mouse events`, `Observation time`, LOO, LOO_diff)  %>%
+  mutate_if(is_numeric, round, 2)
+```
+
+#### Estimate comparison (Figure S5)
+
+Comparing the estimates for b1, b2, and b3 depending on model M2, M3, and M4.
+
+```{r}
+# Estimates of b1, b2, and b3 for Model M2, M3, and M4
+means <- map_dbl(ms[2:length(ms)], function(m) 
+  summary(m)$fixed['tradeoff','Estimate'])
+hpdis <- do.call(rbind, map(ms[2:length(ms)], function(m) 
+  coda::HPDinterval(as.mcmc(m, combine_chains = T))['b_tradeoff',]))
+
+model_comp_est <- data.frame(Model = paste0("M", 2:4), model_order = 4:2, Mean = means, lower = hpdis[ ,1], upper = hpdis[ ,2])
+
+# Plot
+model_comp_est %>%
+  ggplot(aes(y = reorder(Model, model_order))) +
+  geom_point(aes(x = Mean)) +
+  geom_segment(aes(yend = Model, x = upper, xend = lower), lineend = "square") +
+  geom_vline(aes(xintercept = 0), linetype = "dashed") +
+  labs(x = "Model", y = "Estimate") +
+  theme_classic()
+```
+
+
+### C3: Selection bias
+
+Here we test for selection bias by statistically comparing whether subjects with many observations are less stressed than subjects with many observations. A significant test results would indicate that subjects that continuously participate tend to be less stressed, whereas subjects that drop out earlier of our study tend to be more stressed. 
+
+```{r}
+# N and N_stress by user
+df_summary <- df %>%
+  group_by(user) %>%
+  summarise(n = n(),
+            n_stress = sum(stress == 1)) %>%
+  ungroup()
+
+# Users with few recordings
+few_n <- dplyr::filter(df_summary, n <= 10)
+# Users with many recordings
+many_n <- dplyr::filter(df_summary, n > 10)
+
+# Number of stressed recordings
+n_stress <- c(Few = sum(few_n$n_stress), Many = sum(many_n$n_stress))
+# Number of total recordings
+n <- c(Few = sum(few_n$n), Many = sum(many_n$n))
+
+# Test for equal proportions
+t <- prop.test(x = n_stress, n = n, correct = T)
+print(t)
+
+# Show result table
+data.frame(
+  m = c(nrow(few_n), nrow(many_n), Total = nrow(few_n) + nrow(many_n)),
+  n = c(n, Total = sum(n)),
+  n_stress = c(n_stress, Total = sum(n_stress)),
+  p_stress = round(100 * c(n_stress / n, Total = sum(df_summary$n_stress) / sum(df_summary$n)), 2),
+  test = c("", round(t$statistic, 2), Total = "")
+) 
+```
