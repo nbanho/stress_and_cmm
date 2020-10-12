@@ -33,13 +33,10 @@ df <- read.csv("data.csv", stringsAsFactors = F)
 
 ### Stratification
 
-Here we stratify the data and require a minimum of two recordings per user and only consider recordings with at least 10 complete computer mouse trajectories. With fewer trajectories, average mouse speed and accuracy might be too noisy. Nevertheless, we later run a sensitivity analysis where we vary the minimum number of trajectories.
+Here we stratify the data by only considering recordings with at least 10 complete computer mouse trajectories. With fewer trajectories, average mouse speed and accuracy might be too noisy. Nevertheless, we later run a sensitivity analysis where we vary the minimum number of trajectories.
 
 ```{r}
 df_sub <- df %>%
-  group_by(user) %>%
-  dplyr::filter(n() >= 2) %>%
-  ungroup %>%
   dplyr::filter(!is.na(speed)) %>%
   dplyr::filter(n_traj >= 10) 
 ```
@@ -281,9 +278,6 @@ Here we show robustness of our main parameter estimates when recordings from two
 
 ```{r}
 df_no_outl <- df %>%
-  group_by(user) %>%
-  dplyr::filter(n() >= 2) %>%
-  ungroup %>%
   dplyr::filter(!is.na(speed)) %>%
   dplyr::filter(n_traj >= 10) %>%
   # Filter recordings from these two users that have outliers for mouse accuracy
@@ -314,9 +308,6 @@ vi2_ts <- list()
 for (t in 1:length(min_t)) {
   # Stratification
   df_t <- df %>%
-    group_by(user) %>%
-    dplyr::filter(n() >= 2) %>%
-    ungroup %>%
     dplyr::filter(!is.na(speed)) %>%
     dplyr::filter(n_traj >= min_t[t])
   
